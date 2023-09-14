@@ -44,6 +44,10 @@ class task_actor(nn.Module):
         self.k = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, data, job_index, feas, mask, action_pro, train):
+        """
+        This method determines that for the specific job, the probability
+        of which task is higher.
+        """
 
         mask = torch.from_numpy(mask).to(DEVICE)
 
@@ -81,7 +85,7 @@ class task_actor(nn.Module):
         temp.masked_fill_(mask, float('-inf'))
 
         # "p" stands for probability
-        # p.shape = (24, 10)
+        # the shape of p is (24,10)
         p = F.softmax(temp, dim=1)
 
         # -----------------------------------------------------
@@ -100,16 +104,14 @@ class task_actor(nn.Module):
         action_pro[tag + job_index] = ppp[tag + action_index]
         # action_index.shape = (24,1) - number of tasks - for each task it finds suitable job
 
+        datasize = np.array(data[0], dtype=np.single)
+        T = np.array(data[1], dtype=np.single)
         dur_l = np.array(data[2], dtype=np.single)  # single  ##
-
         dur_e = np.array(data[3], dtype=np.single)
-
         dur_s = np.array(data[4], dtype=np.single)
 
-        datasize = np.array(data[0], dtype=np.single)
-
-        T = np.array(data[1], dtype=np.single)
-
+        # process_time is a PyTorch array that stores process time for each task based on
+        # it's corresponding job (machine).
         process_time = np.zeros((self.batch, 2), dtype=np.single)
 
         for i in range(self.batch):

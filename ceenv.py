@@ -21,14 +21,11 @@ OFFLOAD_ENERGY_FACTOR = 1
 class CLOUD_edge(gym.Env, EzPickle):
     def __init__(self,
                  n_j,
-                 maxtasks,
-                 max_Men):
+                 maxtasks):
         EzPickle.__init__(self)
         self.maxtasks = maxtasks
 
         self.n_j = n_j
-
-        self.maxMen = max_Men
 
         self.step_count = 0
 
@@ -50,19 +47,13 @@ class CLOUD_edge(gym.Env, EzPickle):
 
         # self.place = data[-1]  ##
 
+        self.datasize = np.array(data[0], dtype=np.single)
+        self.deadline = np.array(data[1], dtype=np.single)
         self.dur_l = np.array(data[2], dtype=np.single)  # single  ##
-
         self.dur_e = np.array(data[3], dtype=np.single)
-
         self.dur_s = np.array(data[4], dtype=np.single)
 
-        self.datasize = np.array(data[0], dtype=np.single)
-
-        self.T = np.array(data[1], dtype=np.single)
-        # print('####',self.T.dtype)
-
-        # task feature
-        ##############################################################
+        # Extracting task feature
         self.I = np.full(shape=(self.batch, self.n_j, 2), fill_value=0, dtype=bool)
 
         self.LBs = np.zeros((self.batch, self.n_j, 2), dtype=np.single)
@@ -76,14 +67,16 @@ class CLOUD_edge(gym.Env, EzPickle):
         # self.G_LBs = np.ones((self.batch,self.n_j,2), dtype=np.single)
         self.place_time = np.zeros((self.batch, 2), dtype=np.single)
 
-        self.task_mask = np.full(shape=self.T.shape, fill_value=0, dtype=bool)
+        self.task_mask = np.full(shape=self.deadline.shape, fill_value=0, dtype=bool)
 
         self.place_mask = np.full(shape=self.LBs.shape, fill_value=0, dtype=bool)
 
         # TODO: this is not correct, cloud node's initial energy is not equal to local node's energy
         self.edges_energies = np.full((self.n_j, 2), fill_value=INITIAL_ENERGY)
 
-        # print('T',self.task_mask.shape)
+        # REms stands for Reduced Energy minimum
+        self.REm = np.zeros((self.batch, self.n_j), dtype=np.single)
+
         # self.Fi = np.zeros((self.batch,self.n_j,2), dtype=np.single)
         for i in range(self.batch):
             for j in range(self.n_j):
@@ -93,22 +86,25 @@ class CLOUD_edge(gym.Env, EzPickle):
                 # on cloud
                 self.LBs[i][j][1] = self.dur_s[i][j] + self.dur_e[i][j]
 
-                self.Fi[i][j][0] = self.T[i][j] - self.LBs[i][j][0]
+                self.Fi[i][j][0] = self.deadline[i][j] - self.LBs[i][j][0]
 
-                self.Fi[i][j][1] = self.T[i][j] - self.LBs[i][j][1]
+                self.Fi[i][j][1] = self.deadline[i][j] - self.LBs[i][j][1]
 
                 self.LBm[i][j][0] = min(self.LBs[i][j][0], self.LBs[i][j][1])
 
                 self.Fim[i][j][0] = self.Fi[i][j][1]
 
-        task_feas = np.concatenate((self.LBm.reshape(self.batch, self.n_j, 1),
-                                    self.Fim.reshape(self.batch, self.n_j, 1),
-                                    self.task_mask.reshape(self.batch, self.n_j, 1),
-                                   )
-                                   , axis=2)
+
+        task_features = np.concatenate((
+                                        self.LBm.reshape(self.batch, self.n_j, 1),
+                                        self.Fim.reshape(self.batch, self.n_j, 1),
+                                        self.task_mask.reshape(self.batch, self.n_j, 1),
+                                        self.REm.reshape(self.batch, self.n_j, 1),
+                                        )
+                                       , axis=2)
 
         # print(self.I[0])
-        return task_feas, self.task_mask, self.place_time
+        return task_features, self.task_mask, self.place_time
 
     def step(self, task_action, p_action, tasks_per_node):
         """Update features based on the actions of the agents"""
@@ -117,9 +113,9 @@ class CLOUD_edge(gym.Env, EzPickle):
 
         for i in range(self.batch):
             if p_action[i] == 1:
-                earlist_ind = np.argmin(self.job_finish_time_on_cloudy[i])
+                earliest_ind = np.argmin(self.job_finish_time_on_cloudy[i])
 
-                self.job_finish_time_on_cloudy[i][earlist_ind] = self.LBs[i][task_action[i]][1]
+                self.job_finish_time_on_cloudy[i][earliest_ind] = self.LBs[i][task_action[i]][1]
 
                 min_ind = np.argmin(self.job_finish_time_on_cloudy[i])
 
@@ -130,25 +126,29 @@ class CLOUD_edge(gym.Env, EzPickle):
         # compute reward
         reward = np.zeros((self.batch, 1))
         for i in range(self.batch):
-
             selected_node = task_action[i]
+            correct_energy_decision = False
 
             energy_consumption = self.datasize[i][selected_node] * energies[p_action[i]]
+
             #  if the task meets deadline or not
-            if self.LBs[i][task_action[i]][p_action[i]] < self.T[i][task_action[i]] * BREAKING_FACTOR:
+            if self.LBs[i][selected_node][p_action[i]] <= self.deadline[i][selected_node]:
+                # reducing process energy from selected edge
+                if self.edges_energies[selected_node][p_action[i]] >= energy_consumption:
+                    correct_energy_decision = True
+
+            if correct_energy_decision:
+                self.edges_energies[selected_node][p_action[i]] -= energy_consumption
                 total_energy_consumption = total_energy_consumption + energy_consumption
-                reward[i] = self.LBs[i][task_action[i]][p_action[i]]
-
+                reward[i] = self.LBs[i][selected_node][p_action[i]]
             else:
-                reward[i] = self.LBs[i][task_action[i]][p_action[i]] * 10
+                reward[i] = self.LBs[i][selected_node][p_action[i]] * 10
+                # print('timewindows')
 
-        # print(p_action[0])
-        # print('reward',reward[0])
+        print('reward', reward[0])
         earliest_time = np.zeros((self.batch, 1))
         for i in range(self.batch):
             earliest_time[i] = min(self.job_finish_time_on_cloudy[i])
-        # print(earlist_time[0])
-        # print(place_time[0])
 
         for i in range(self.batch):
             self.I[i][task_action[i]][0] = True
@@ -156,7 +156,7 @@ class CLOUD_edge(gym.Env, EzPickle):
             self.I[i][task_action[i]][1] = True
 
         for b in range(self.batch):
-            self.task_mask[b][task_action[b]] = True  ##已调度任务mask
+            self.task_mask[b][task_action[b]] = True
 
         for i in range(self.batch):
             for j in range(self.n_j):
@@ -164,12 +164,14 @@ class CLOUD_edge(gym.Env, EzPickle):
                 deadline = self.T[i][j] * BREAKING_FACTOR
 
                 if self.I[i][j][0] == False and self.I[i][j][1] == False:
+                    # EDGE
                     job_ready_time_a_e = 0
-
                     compute_ready_time_a_e = 0
 
                     job_start_time_a_e = max(job_ready_time_a_e, compute_ready_time_a_e)
 
+                    # dur_l is the processing time of task i in core j in edge layer
+                    job_finish_time_a_e = job_start_time_a_e + self.dur_l[i][j]
                     # dur_l is the processing time of task i in core j
                     job_busy_time_a_e = np.sum(self.LBs[:, j, 0])
 
@@ -185,7 +187,6 @@ class CLOUD_edge(gym.Env, EzPickle):
 
                     # CLOUD
                     job_ready_time_a_c = self.dur_s[i][j]
-
                     compute_ready_time_a_c = min(self.job_finish_time_on_cloudy[i])
 
                     job_start_time_a_c = max(job_ready_time_a_c, compute_ready_time_a_c)
@@ -194,6 +195,8 @@ class CLOUD_edge(gym.Env, EzPickle):
 
                     job_finished_time_a_c = job_busy_time_a_c + job_start_time_a_c + self.dur_e[i][j]
 
+                    # calculating remained time to deadline
+                    self.Fi[i][j] = self.deadline[i][j] - self.LBs[i][j]
                     self.LBs[i][j][1] = job_finished_time_a_c * BREAKING_FACTOR
 
                     if deadline < self.LBs[i][j][1]:
@@ -210,9 +213,13 @@ class CLOUD_edge(gym.Env, EzPickle):
                     # is this ok ?? It chooses the Fi on cloud
                     self.Fim[i][j][0] = self.Fi[i][j][1]
 
+                    # Energy features
+                    self.REm[i][j] = min(INITIAL_ENERGY - self.edges_energies[j][0], INITIAL_ENERGY - self.edges_energies[j][1])
+
         task_feas = np.concatenate((self.LBm.reshape(self.batch, self.n_j, 1),
                                     self.Fim.reshape(self.batch, self.n_j, 1),
                                     self.task_mask.reshape(self.batch, self.n_j, 1),
+                                    self.REm.reshape(self.batch, self.n_j, 1)
                                     )
                                    , axis=2)
 
